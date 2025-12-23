@@ -292,6 +292,7 @@ dependencies = [
  "backoff",
  "color-eyre",
  "csv",
+ "eyre",
  "futures",
  "log",
  "regex",

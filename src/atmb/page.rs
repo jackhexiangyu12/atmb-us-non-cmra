@@ -185,30 +185,97 @@ pub struct LocationDetailPage {
 impl LocationDetailPage {
     pub fn parse_html(html: &str) -> color_eyre::Result<Self> {
         let document = Html::parse_document(html);
-        let address_container = document.select(&LOCATION_DETAIL_SELECTOR).next().unwrap();
-        let div_selector = Selector::parse("div").unwrap();
 
-        let lines = address_container.select(&div_selector)
-            .map(|div| div.text().collect::<String>())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
+        // 首先尝试使用原有的选择器
+        let address_container = document
+            .select(&LOCATION_DETAIL_SELECTOR)
+            .next();
 
-        let line2 = match lines.len() {
-            // no line2
-            4 => None,
-            // one-line line2
-            5 => Some(lines[2].to_string()),
-            // two-line line2
-            6 => Some(format!("{} {}", lines[2], lines[3])),
-            7 => None,
-            _ => bail!("Unexpected address line count: {}, page structure might be changed: {:?}", lines.len(), lines),
-        };
-        Ok(
-            Self {
-                line1: lines[1].clone(),
-                line2,
+        if let Some(address_container) = address_container {
+            let div_selector = Selector::parse("div")
+                .map_err(|err| eyre::eyre!("Failed to parse div selector: {}", err))?;
+
+            let lines = address_container
+                .select(&div_selector)
+                .map(|div| div.text().collect::<String>())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+
+            // 打印调试信息
+            log::debug!("Found {} address lines: {:?}", lines.len(), lines);
+
+            let line2 = match lines.len() {
+                // no line2
+                3 | 4 => None,
+                // one-line line2
+                5 => Some(lines[2].to_string()),
+                // two-line line2
+                6 => Some(format!("{} {}", lines[2], lines[3])),
+                // 更多的行，尝试解析
+                7 | 8 => {
+                    // 查找包含 suite, unit, # 等关键词的行
+                    let address_lines: Vec<_> = lines.iter()
+                        .skip(2) // 跳过前两行（通常是标题和主要地址）
+                        .filter(|line| {
+                            line.to_lowercase().contains("suite") ||
+                            line.to_lowercase().contains("unit") ||
+                            line.to_lowercase().contains("#") ||
+                            line.chars().any(|c| c.is_numeric())
+                        })
+                        .take(2)
+                        .cloned()
+                        .collect();
+                    
+                    if address_lines.is_empty() {
+                        None
+                    } else {
+                        Some(address_lines.join(" "))
+                    }
+                },
+                _ => {
+                    log::warn!("Unexpected address line count: {}, page structure might be changed: {:?}", lines.len(), lines);
+                    None
+                },
+            };
+
+            if let Some(line1) = lines.get(1) {
+                return Ok(Self {
+                    line1: line1.clone(),
+                    line2,
+                });
             }
-        )
+        }
+
+        // 如果原有选择器失败，尝试备用方法查找地址信息
+        log::warn!("Primary selector failed, trying fallback methods");
+        
+        // 尝试查找包含地址信息的各种可能选择器
+        let fallback_selectors = [
+            r#"div[class*="address"]"#,
+            r#"div[class*="location"]"#,
+            r#"p[class*="address"]"#,
+            r#"span[class*="address"]"#,
+            r#"div:contains("Street")"#,
+            r#"div:contains("Ave")"#,
+            r#"div:contains("St")"#,
+        ];
+        
+        for selector_str in &fallback_selectors {
+            if let Ok(selector) = Selector::parse(selector_str) {
+                if let Some(element) = document.select(&selector).next() {
+                    let text = element.text().collect::<String>();
+                    if !text.is_empty() && (text.contains("St") || text.contains("Ave") || text.contains("Street")) {
+                        log::info!("Found address using fallback selector '{}': {}", selector_str, text);
+                        return Ok(Self {
+                            line1: text.trim().to_string(),
+                            line2: None,
+                        });
+                    }
+                }
+            }
+        }
+        
+        Err(eyre::eyre!("Failed to find address information using any selector"))
     }
 
     /// concatenate line1 and line2

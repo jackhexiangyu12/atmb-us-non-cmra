@@ -4,8 +4,8 @@ use std::time::Duration;
 use backoff::{future::retry, ExponentialBackoff};
 use log::warn;
 
-/// Retry a function for a number of times
-pub async fn retry_wrapper<I, E, F, Fut>(retry_times: usize, f: F) -> Result<I, E>
+/// Retry a function indefinitely
+pub async fn retry_wrapper<I, E, F, Fut>(_retry_times: usize, f: F) -> Result<I, E>
 where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<I, E>>,
@@ -18,24 +18,22 @@ where
             warn!("retrying for the {} time", times);
         }
         f().await
-            .map_err(|err| map_to_backoff_err(err, times, retry_times))
+            .map_err(|err| map_to_backoff_err(err))
     })
         .await
 }
 
-fn map_to_backoff_err<E>(err: E, cur_times: usize, max_times: usize) -> backoff::Error<E> {
-    if cur_times > max_times {
-        backoff::Error::permanent(err)
-    } else {
-        backoff::Error::transient(err)
-    }
+fn map_to_backoff_err<E>(err: E) -> backoff::Error<E> {
+    backoff::Error::transient(err)
 }
 
 #[inline]
 fn backoff_config() -> ExponentialBackoff {
     ExponentialBackoff {
-        initial_interval: Duration::from_millis(1000),
-        max_interval: Duration::from_millis(5000),
+        initial_interval: Duration::from_millis(250),
+        max_interval: Duration::from_millis(250),
+        multiplier: 0.25,
+        max_elapsed_time: None, // No time limit, retry indefinitely
         ..Default::default()
     }
 }

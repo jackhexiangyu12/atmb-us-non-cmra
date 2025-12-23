@@ -3,6 +3,7 @@ use futures::StreamExt;
 use log::info;
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use std::time::Duration;
 use crate::atmb::model::Mailbox;
 use crate::atmb::page::{CountryPage, LocationDetailPage, StatePage};
 use crate::utils::retry_wrapper;
@@ -169,37 +170,31 @@ impl ATMBCrawl {
 
     async fn update_street2_for_mailbox(&self, mailboxes: Vec<Mailbox>) -> color_eyre::Result<Vec<Mailbox>> {
         let total_mailboxes = mailboxes.len();
+        let mut successful_mailboxes = Vec::with_capacity(mailboxes.len());
 
-        let mailboxes = futures::stream::iter(mailboxes).enumerate().map(|(idx, mut mailbox)| {
-            let link = mailbox.link.clone();
-            async move {
-                let fut = || async {
-                    info!("[{}/{}] fetching the detail page of [{}]...", idx + 1, total_mailboxes, mailbox.name);
-                    let detail_page = self.fetch_location_detail_page(&mailbox.link).await?;
-                    mailbox.address.line1 = detail_page.street();
-                    Result::<_, color_eyre::eyre::Error>::Ok(mailbox)
-                };
-                fut().await
-                    .map_err(|err| {
-                        let err = eyre!("cannot fetch detail page for: [{}]: {:?}", link, err);
-                        log::error!("{:?}", err);
-                        err
-                    })
+        for (idx, mut mailbox) in mailboxes.into_iter().enumerate() {
+            let name = mailbox.name.clone();
+            
+            loop {
+                info!("[{}/{}] fetching the detail page of [{}]...", idx + 1, total_mailboxes, mailbox.name);
+                
+                match self.fetch_location_detail_page(&mailbox.link).await {
+                    Ok(detail_page) => {
+                        mailbox.address.line1 = detail_page.street();
+                        successful_mailboxes.push(mailbox);
+                        break;
+                    },
+                    Err(err) => {
+                        log::error!("Failed to fetch detail page for [{}]: {}", name, err);
+                        log::info!("Will retry in 5 seconds...");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
             }
-        })
-            .buffer_unordered(10)
-            .collect::<Vec<_>>()
-            .await;
-
-        let (suc_list, err_list): (Vec<_>, Vec<_>) = mailboxes.into_iter().partition(Result::is_ok);
-        let suc_list = suc_list.into_iter().filter_map(Result::ok).collect::<Vec<_>>();
-        let err_list = err_list.into_iter().filter_map(Result::err).collect::<Vec<_>>();
-
-        if !err_list.is_empty() {
-            bail!("{:#?}", err_list);
-        } else {
-            Ok(suc_list)
         }
+        
+        log::info!("Successfully fetched all {} mailbox details", successful_mailboxes.len());
+        Ok(successful_mailboxes)
     }
 
     async fn fetch_state_pages(&self, country_page: &CountryPage<'_>) -> color_eyre::Result<Vec<StatePage>> {
@@ -230,7 +225,14 @@ impl ATMBCrawl {
     }
 
     async fn fetch_location_detail_page(&self, mailbox_link: &str) -> color_eyre::Result<LocationDetailPage> {
-        let html = self.client.fetch_page(mailbox_link).await?;
-        Ok(LocationDetailPage::parse_html(&html)?)
+        retry_wrapper(3, || async {
+            let html = self.client.fetch_page(mailbox_link).await?;
+            let page = LocationDetailPage::parse_html(&html)
+                .map_err(|e| {
+                    log::error!("Failed to parse page {}: {}", mailbox_link, e);
+                    e
+                })?;
+            Result::<_, color_eyre::eyre::Error>::Ok(page)
+        }).await
     }
 }
